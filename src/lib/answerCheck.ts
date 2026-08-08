@@ -20,6 +20,10 @@ function normalise(raw: string): string {
   for (const [glyph, expansion] of Object.entries(UNICODE_FRACTIONS)) {
     s = s.split(glyph).join(expansion);
   }
+  // Mark mixed numbers ("1 1/24") with an underscore before the final whitespace
+  // strip below, so "whole part" + "fraction part" stays distinguishable as
+  // "1_1/24" rather than collapsing into the unrelated fraction "11/24".
+  s = s.replace(/(-?\d+)\s+(\d+\/\d+)/g, "$1_$2");
   return s.replace(/\s+/g, "");
 }
 
@@ -53,6 +57,15 @@ function gcd(a: number, b: number): number {
 }
 
 function parseFractionParts(s: string): { n: number; d: number } | null {
+  // Mixed number, marked by normalise() as "whole_n/d" (e.g. "1_1/24" for 1 1/24).
+  const mixed = s.match(/^(-?\d+)_(\d+)\/(\d+)$/);
+  if (mixed) {
+    const whole = Number(mixed[1]);
+    const fd = Number(mixed[3]);
+    if (fd === 0) return null;
+    const sign = whole < 0 ? -1 : 1;
+    return { n: whole * fd + sign * Number(mixed[2]), d: fd };
+  }
   const m = s.match(/^(-?\d+)\/(-?\d+)$/);
   if (!m) return null;
   const d = Number(m[2]);
@@ -70,7 +83,14 @@ function compareFraction(input: string, canonical: string): { correct: boolean; 
   const inputParts = parseFractionParts(input);
   const canonParts = parseFractionParts(canonical);
   if (!inputParts || !canonParts) {
-    return { correct: compareNumeric(input, canonical, 1e-9), unreduced: false };
+    // At least one side is a decimal (e.g. "1.0417" for canonical "1 1/24") rather than
+    // n/d notation — evaluate whichever side IS a fraction down to a decimal first, so a
+    // truncated decimal reading of a fraction still compares correctly, with a wider
+    // tolerance than exact-rational comparison since decimal input is inherently truncated.
+    const inputVal = inputParts ? inputParts.n / inputParts.d : Number(input);
+    const canonVal = canonParts ? canonParts.n / canonParts.d : Number(canonical);
+    const correct = !Number.isNaN(inputVal) && !Number.isNaN(canonVal) && Math.abs(inputVal - canonVal) <= 1e-4;
+    return { correct, unreduced: false };
   }
   const [inN, inD] = normaliseFractionSign(inputParts.n, inputParts.d);
   const [cnN, cnD] = normaliseFractionSign(canonParts.n, canonParts.d);

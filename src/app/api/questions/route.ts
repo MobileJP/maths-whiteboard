@@ -8,9 +8,12 @@ const SYSTEM_PROMPT = `You generate UK Year 7 (KS3) maths practice questions for
 For EACH question produce, in the same response:
 - question_text: the question, as LaTeX (inline maths in $...$, display maths in $$...$$)
 - answer_type: one of "numeric" | "fraction" | "expression" | "ratio" | "text"
-- canonical_answer: the definitive form of the answer, as a plain string (e.g. "1/2", "3x+2", "12", "2:3")
+- canonical_answer: the definitive form of the answer, as a plain string (e.g. "1/2", "3x+2", "12", "2:3").
+  For answer_type "fraction", canonical_answer MUST be a single improper fraction in "n/d" form
+  (e.g. "25/24", never "1 1/24") — put the mixed-number reading in accepted_forms instead.
 - accepted_forms: an array of every reasonable equivalent form a student might type
-  (e.g. for 1/2: ["1/2", "0.5", "50%"])
+  (e.g. for 1/2: ["1/2", "0.5", "50%"]; for an improper fraction like 25/24, include the mixed-number
+  form too: ["25/24", "1 1/24", "1.041666..."])
 - tolerance: a number for decimal answers where exactness isn't expected, otherwise null
 - units: the required units as a string (e.g. "cm²"), otherwise null
 - preferred_input: "typed" for simple final answers (arithmetic, fractions, percentages, single
