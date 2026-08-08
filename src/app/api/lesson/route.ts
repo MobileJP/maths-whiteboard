@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { anthropic, fastModel } from "@/lib/anthropic";
+import { getAnthropicClient, fastModel } from "@/lib/anthropic";
 
 // RFD §12.1 — Haiku, teaching UK Year 7 (KS3) maths to an adult relearner.
 const SYSTEM_PROMPT = `You teach UK Year 7 (KS3) maths to an adult relearner brushing up on the curriculum —
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const stream = anthropic.messages.stream({
+  const stream = getAnthropicClient().messages.stream({
     model: fastModel(),
     max_tokens: 2000,
     system: SYSTEM_PROMPT,

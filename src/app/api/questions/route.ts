@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { anthropic, capableModel } from "@/lib/anthropic";
+import { getAnthropicClient, capableModel } from "@/lib/anthropic";
 import type { Question } from "@/lib/types";
 
 // RFD §12.2 — Sonnet, full answer metadata generated with the question in the same response.
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "topic is required" }, { status: 400 });
   }
 
-  const message = await anthropic.messages.create({
+  const message = await getAnthropicClient().messages.create({
     model: capableModel(),
     max_tokens: 4000,
     system: SYSTEM_PROMPT,

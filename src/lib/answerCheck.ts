@@ -1,5 +1,5 @@
 import { create, all } from "mathjs";
-import { anthropic, fastModel } from "./anthropic";
+import { getAnthropicClient, fastModel } from "./anthropic";
 import type { Question } from "./types";
 
 const math = create(all, {});
@@ -223,7 +223,7 @@ export function checkLocally(question: Question, rawAnswer: string): LocalCheckO
 // RFD §9.3 / §8: the single deliberate exception to "typed answers need no model call" —
 // only reached when local comparison genuinely can't determine equivalence.
 export async function adjudicateNearMiss(question: Question, rawAnswer: string): Promise<{ correct: boolean; note: string }> {
-  const message = await anthropic.messages.create({
+  const message = await getAnthropicClient().messages.create({
     model: fastModel(),
     max_tokens: 200,
     system:
