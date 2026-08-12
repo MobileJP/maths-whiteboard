@@ -34,3 +34,9 @@ export function fastModel(): string {
 export function capableModel(): string {
   return requireModel("ANTHROPIC_MODEL_CAPABLE");
 }
+
+// Models return JSON wrapped in ```json fences despite being told not to — strip defensively
+// before parsing. Shared by every route that asks Claude for structured output.
+export function stripCodeFences(text: string): string {
+  return text.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+}

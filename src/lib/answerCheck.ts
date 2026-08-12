@@ -179,6 +179,13 @@ export function checkLocally(question: Question, rawAnswer: string): LocalCheckO
   const acceptedNormalised = question.accepted_forms.map(normalise);
 
   if (normalisedInput === normalisedCanonical || acceptedNormalised.includes(normalisedInput)) {
+    // canonical_answer and accepted_forms store the bare value, not the value-with-units
+    // (units lives in its own field) — so a textual match here says nothing about whether
+    // the student included units. Check separately so a bare "15" against a "15cm" question
+    // still gets the RFD §9.3 units nudge instead of a silent, note-less correct.
+    if (question.units && !stripUnits(normalisedInput, question.units).hadUnits) {
+      return { status: "near_miss_units", note: "Right value — but check the units." };
+    }
     return { status: "correct" };
   }
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAnthropicClient, capableModel } from "@/lib/anthropic";
+import { getAnthropicClient, capableModel, stripCodeFences } from "@/lib/anthropic";
 import type { Question } from "@/lib/types";
 
 // RFD §12.2 — Sonnet, full answer metadata generated with the question in the same response.
@@ -31,10 +31,6 @@ Rules:
 
 Return ONLY strict JSON matching this shape, no code fences, no commentary:
 {"questions": [ { ...one object per field above... } ]}`;
-
-function stripCodeFences(text: string): string {
-  return text.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
-}
 
 export async function POST(req: NextRequest) {
   const body = (await req.json()) as { topic?: string; difficulty?: string; count?: number };

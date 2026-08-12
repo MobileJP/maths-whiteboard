@@ -4,7 +4,26 @@ import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent }
 import { KatexText } from "@/components/KatexText";
 import { MathField } from "@/components/MathField";
 import { Whiteboard, type WhiteboardHandle } from "@/components/Whiteboard";
-import type { CheckResult, Question } from "@/lib/types";
+import type { CheckResult, MarkResult, Question } from "@/lib/types";
+
+// Mirrors stripCodeFences in src/lib/anthropic.ts — duplicated here rather than imported so
+// this client component doesn't pull the Anthropic SDK into the browser bundle.
+function stripCodeFences(text: string): string {
+  return text.trim().replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+}
+
+async function readStreamedText(res: Response): Promise<string> {
+  if (!res.ok || !res.body) throw new Error(`Request failed (${res.status})`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  return text;
+}
 
 type ResponseMode = "mark_only" | "mark_and_hint" | "full_solution";
 type InputMode = "typed" | "handwritten";
@@ -116,7 +135,7 @@ export default function Home() {
       <header className="border-b border-slate-200 bg-white px-6 py-4">
         <h1 className="text-xl font-semibold">Maths Whiteboard</h1>
         <p className="text-sm text-slate-500">
-          Phase 1 (local) — lesson + question generation, typed answer checking, whiteboard (marking not wired up yet)
+          Phase 1 (local) — lesson + question generation, typed answer checking, handwritten answer marking
         </p>
       </header>
 
@@ -218,10 +237,51 @@ function QuestionPanel({
   const [answer, setAnswer] = useState("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
+
+  const [marking, setMarking] = useState(false);
+  const [markResult, setMarkResult] = useState<MarkResult | null>(null);
+  const [retyping, setRetyping] = useState(false);
+  const [retypeText, setRetypeText] = useState("");
+
   const [hintRevealed, setHintRevealed] = useState(false);
   const [solutionRevealed, setSolutionRevealed] = useState(false);
   const [activeInput, setActiveInput] = useState<InputMode>(question.preferred_input);
   const whiteboardRef = useRef<WhiteboardHandle>(null);
+
+  const runMark = useCallback(
+    async (body: { image?: string; correctedWorking?: string }) => {
+      setMarking(true);
+      try {
+        const res = await fetch("/api/mark", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, ...body }),
+        });
+        const text = await readStreamedText(res);
+        const parsed = JSON.parse(stripCodeFences(text)) as MarkResult;
+        setMarkResult(parsed);
+        setHintRevealed(false);
+        setSolutionRevealed(false);
+        setRetyping(false);
+      } catch (err) {
+        onError(err instanceof Error ? err.message : "Failed to mark drawing");
+      } finally {
+        setMarking(false);
+      }
+    },
+    [question, onError],
+  );
+
+  const submitDrawing = useCallback(async () => {
+    const board = whiteboardRef.current;
+    if (!board || board.isEmpty()) return;
+    await runMark({ image: board.exportPNG() });
+  }, [runMark]);
+
+  const submitRetype = useCallback(async () => {
+    if (!retypeText.trim()) return;
+    await runMark({ correctedWorking: retypeText });
+  }, [retypeText, runMark]);
 
   const submitAnswer = useCallback(async () => {
     if (!answer.trim()) return;
@@ -280,17 +340,17 @@ function QuestionPanel({
         </div>
       )}
 
-      {activeInput === "typed" ? (
-        <div className="flex items-center gap-3">
-          <select
-            className="rounded-md border border-slate-300 px-2 py-1 text-sm"
-            value={responseMode}
-            onChange={(e) => onResponseModeChange(e.target.value as ResponseMode)}
-          >
-            <option value="mark_only">Mark only</option>
-            <option value="mark_and_hint">Mark + hint</option>
-            <option value="full_solution">Full solution</option>
-          </select>
+      <div className="flex items-center gap-3">
+        <select
+          className="rounded-md border border-slate-300 px-2 py-1 text-sm"
+          value={responseMode}
+          onChange={(e) => onResponseModeChange(e.target.value as ResponseMode)}
+        >
+          <option value="mark_only">Mark only</option>
+          <option value="mark_and_hint">Mark + hint</option>
+          <option value="full_solution">Full solution</option>
+        </select>
+        {activeInput === "typed" ? (
           <button
             className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40"
             onClick={submitAnswer}
@@ -298,12 +358,16 @@ function QuestionPanel({
           >
             {checking ? "Checking…" : "Submit"}
           </button>
-        </div>
-      ) : (
-        <p className="text-xs text-slate-400">
-          Handwriting marking (/api/mark) isn&apos;t built yet — drawing is saved on-canvas only for now.
-        </p>
-      )}
+        ) : (
+          <button
+            className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-40"
+            onClick={submitDrawing}
+            disabled={marking}
+          >
+            {marking ? "Marking…" : "Submit drawing"}
+          </button>
+        )}
+      </div>
 
       {checkResult && (
         <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
@@ -324,37 +388,113 @@ function QuestionPanel({
           {checkResult.note && <p className="mt-1 text-sm text-slate-600">{checkResult.note}</p>}
 
           {checkResult.verdict !== "correct" && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {(responseMode === "mark_and_hint" || responseMode === "full_solution") && !hintRevealed && (
+            <HintSolutionControls
+              question={question}
+              responseMode={responseMode}
+              hintRevealed={hintRevealed}
+              solutionRevealed={solutionRevealed}
+              onRevealHint={() => setHintRevealed(true)}
+              onRevealSolution={() => setSolutionRevealed(true)}
+            />
+          )}
+        </div>
+      )}
+
+      {/* RFD §10.4: transcription-first display — what Claude read, before the verdict, so a
+          misread becomes a correction rather than an untrusted wrong mark. */}
+      {markResult && (
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+          <p className="text-sm text-slate-500">I read your working as:</p>
+          <div className="mt-1 rounded-md border border-slate-200 bg-white p-2 text-sm">
+            <KatexText text={markResult.transcription} />
+          </div>
+
+          {retyping ? (
+            <div className="mt-2 flex flex-col gap-2">
+              <textarea
+                className="w-full rounded-md border border-slate-300 p-2 text-sm"
+                rows={3}
+                value={retypeText}
+                onChange={(e) => setRetypeText(e.target.value)}
+                placeholder="Type your working as you actually wrote it…"
+              />
+              <div className="flex gap-2">
                 <button
-                  className="rounded-md border border-slate-300 px-3 py-1 text-sm"
-                  onClick={() => setHintRevealed(true)}
+                  className="rounded-md bg-slate-900 px-3 py-1 text-sm text-white disabled:opacity-40"
+                  onClick={submitRetype}
+                  disabled={marking || !retypeText.trim()}
                 >
-                  Hint
+                  {marking ? "Re-marking…" : "Re-mark"}
                 </button>
-              )}
-              {responseMode === "full_solution" && !solutionRevealed && (
                 <button
+                  type="button"
                   className="rounded-md border border-slate-300 px-3 py-1 text-sm"
-                  onClick={() => setSolutionRevealed(true)}
+                  onClick={() => setRetyping(false)}
                 >
-                  Show full solution
+                  Cancel
                 </button>
-              )}
+              </div>
             </div>
+          ) : (
+            <button
+              type="button"
+              className="mt-2 text-xs text-slate-500 underline"
+              onClick={() => {
+                setRetypeText(markResult.transcription);
+                setRetyping(true);
+              }}
+            >
+              That&apos;s not what I wrote
+            </button>
           )}
 
-          {hintRevealed && (
-            <p className="mt-2 text-sm text-slate-700">
-              <strong>Hint: </strong>
-              <KatexText text={question.hint} />
+          {markResult.transcription_confidence === "low" && !retyping ? (
+            <p className="mt-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              That was hard to read clearly, so the mark below may be unreliable — try writing a
+              little larger, or correct the transcription above.
             </p>
-          )}
-          {solutionRevealed && (
-            <div className="mt-2 text-sm text-slate-700">
-              <strong>Solution: </strong>
-              <KatexText text={question.worked_solution} />
-            </div>
+          ) : (
+            !retyping && (
+              <>
+                <p
+                  className={
+                    markResult.verdict === "correct"
+                      ? "mt-3 font-medium text-emerald-700"
+                      : markResult.verdict === "partially_correct"
+                        ? "mt-3 font-medium text-amber-700"
+                        : markResult.verdict === "incorrect"
+                          ? "mt-3 font-medium text-red-700"
+                          : "mt-3 font-medium text-slate-500"
+                  }
+                >
+                  {markResult.verdict === "correct" && "✓ Correct"}
+                  {markResult.verdict === "partially_correct" && "≈ Partially correct"}
+                  {markResult.verdict === "incorrect" && "✗ Not quite"}
+                  {markResult.verdict === "unclear" && "? Unclear"}
+                </p>
+
+                {markResult.first_error && (
+                  <p className="mt-1 text-sm text-slate-600">
+                    <strong>First error ({markResult.first_error.at_step}):</strong>{" "}
+                    {markResult.first_error.what_went_wrong}
+                  </p>
+                )}
+                {markResult.method_note && (
+                  <p className="mt-1 text-sm text-slate-600">{markResult.method_note}</p>
+                )}
+
+                {markResult.verdict !== "correct" && (
+                  <HintSolutionControls
+                    question={question}
+                    responseMode={responseMode}
+                    hintRevealed={hintRevealed}
+                    solutionRevealed={solutionRevealed}
+                    onRevealHint={() => setHintRevealed(true)}
+                    onRevealSolution={() => setSolutionRevealed(true)}
+                  />
+                )}
+              </>
+            )
           )}
         </div>
       )}
@@ -367,5 +507,53 @@ function QuestionPanel({
         Next question →
       </button>
     </div>
+  );
+}
+
+// Shared between the typed and handwritten verdict displays — same gating rule either way:
+// hint needs mark_and_hint or better, full solution needs full_solution. RFD §10.4/§5.4.
+function HintSolutionControls({
+  question,
+  responseMode,
+  hintRevealed,
+  solutionRevealed,
+  onRevealHint,
+  onRevealSolution,
+}: {
+  question: Question;
+  responseMode: ResponseMode;
+  hintRevealed: boolean;
+  solutionRevealed: boolean;
+  onRevealHint: () => void;
+  onRevealSolution: () => void;
+}) {
+  return (
+    <>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {(responseMode === "mark_and_hint" || responseMode === "full_solution") && !hintRevealed && (
+          <button className="rounded-md border border-slate-300 px-3 py-1 text-sm" onClick={onRevealHint}>
+            Hint
+          </button>
+        )}
+        {responseMode === "full_solution" && !solutionRevealed && (
+          <button className="rounded-md border border-slate-300 px-3 py-1 text-sm" onClick={onRevealSolution}>
+            Show full solution
+          </button>
+        )}
+      </div>
+
+      {hintRevealed && (
+        <p className="mt-2 text-sm text-slate-700">
+          <strong>Hint: </strong>
+          <KatexText text={question.hint} />
+        </p>
+      )}
+      {solutionRevealed && (
+        <div className="mt-2 text-sm text-slate-700">
+          <strong>Solution: </strong>
+          <KatexText text={question.worked_solution} />
+        </div>
+      )}
+    </>
   );
 }
