@@ -1,10 +1,22 @@
 "use client";
 
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { KatexText } from "@/components/KatexText";
 import { MathField } from "@/components/MathField";
+import { SchemePicker } from "@/components/SchemePicker";
 import { Whiteboard, type WhiteboardHandle } from "@/components/Whiteboard";
-import type { CheckResult, MarkResult, Question } from "@/lib/types";
+import { schemeTopicPrompt } from "@/lib/curriculum";
+import {
+  readCacheMap,
+  readPosition,
+  readProgressMap,
+  recordAttempt,
+  recordVisit,
+  writeCacheMap,
+  writePosition,
+  writeProgressMap,
+} from "@/lib/progress";
+import type { CheckResult, MarkResult, Question, Topic, TopicProgress } from "@/lib/types";
 
 // Mirrors stripCodeFences in src/lib/anthropic.ts — duplicated here rather than imported so
 // this client component doesn't pull the Anthropic SDK into the browser bundle.
@@ -42,6 +54,25 @@ export default function Home() {
 
   const [error, setError] = useState<string | null>(null);
 
+  // RFD §5.1/§10.2: the 35-lesson scheme is the default, primary way to start a lesson; the
+  // "Teach me…" free-text box (below) is the secondary path and stays available regardless.
+  const [view, setView] = useState<"scheme" | "lesson">("scheme");
+  // null when the open lesson came from the free-text box — only scheme-sourced lessons are
+  // progress-tracked (RFD §5.1: "drives progress tracking").
+  const [activeTopic, setActiveTopic] = useState<Topic | null>(null);
+  // Unlike splitPercent (a style value, safe to lazy-init + suppressHydrationWarning), these
+  // drive which elements exist at all in SchemePicker (the continue-callout button, progress
+  // glyphs) — a structural hydration mismatch, not a suppressible attribute one. So both default
+  // to empty here (matching the static-prerendered server output exactly) and are populated from
+  // localStorage in a mount effect below, same as any other client-only data source.
+  const [progressMap, setProgressMap] = useState<Record<string, TopicProgress>>({});
+  const [currentPositionId, setCurrentPositionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setProgressMap(readProgressMap());
+    setCurrentPositionId(readPosition());
+  }, []);
+
   const splitContainerRef = useRef<HTMLDivElement>(null);
   // Lazy init reads localStorage directly rather than via an effect + setState; this only
   // ever runs client-side (currentQuestion gates all client-only rendering below it), so
@@ -75,13 +106,19 @@ export default function Home() {
 
   const currentQuestion = questions[currentIndex] ?? null;
 
-  const startLesson = useCallback(async () => {
-    if (!topic.trim()) return;
+  // Shared by both the free-text and scheme-driven paths — takes the exact prompt string to
+  // send, and returns the final accumulated content so a scheme-sourced call can cache it. The
+  // streamed lesson text is accumulated in a local var alongside the setState calls, since
+  // React state isn't reliably readable synchronously right after the stream ends.
+  const runGeneration = useCallback(async (topicPrompt: string): Promise<{ lessonText: string; questions: Question[] }> => {
     setError(null);
     setLessonText("");
     setLessonLoading(true);
     setQuestions([]);
     setCurrentIndex(0);
+
+    let finalQuestions: Question[] = [];
+    let finalLessonText = "";
 
     const questionsPromise = (async () => {
       setQuestionsLoading(true);
@@ -89,11 +126,12 @@ export default function Home() {
         const res = await fetch("/api/questions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic, difficulty: "standard", count: 5 }),
+          body: JSON.stringify({ topic: topicPrompt, difficulty: "standard", count: 5 }),
         });
         if (!res.ok) throw new Error(`Question generation failed (${res.status})`);
         const data = (await res.json()) as { questions: Question[] };
-        setQuestions(data.questions ?? []);
+        finalQuestions = data.questions ?? [];
+        setQuestions(finalQuestions);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to generate questions");
       } finally {
@@ -106,7 +144,7 @@ export default function Home() {
         const res = await fetch("/api/lesson", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic }),
+          body: JSON.stringify({ topic: topicPrompt }),
         });
         if (!res.ok || !res.body) throw new Error(`Lesson generation failed (${res.status})`);
         const reader = res.body.getReader();
@@ -114,7 +152,9 @@ export default function Home() {
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
-          setLessonText((prev) => prev + decoder.decode(value, { stream: true }));
+          const chunk = decoder.decode(value, { stream: true });
+          finalLessonText += chunk;
+          setLessonText((prev) => prev + chunk);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to generate lesson");
@@ -124,7 +164,57 @@ export default function Home() {
     })();
 
     await Promise.all([questionsPromise, lessonPromise]);
-  }, [topic]);
+    return { lessonText: finalLessonText, questions: finalQuestions };
+  }, []);
+
+  const startTypedTopic = useCallback(async () => {
+    if (!topic.trim()) return;
+    setActiveTopic(null);
+    setView("lesson");
+    await runGeneration(topic);
+  }, [topic, runGeneration]);
+
+  // RFD §10.2: "Lessons persist — returning to a topic reopens the existing lesson rather than
+  // regenerating, unless a fresh one is requested" — `forceFresh` is that escape hatch.
+  const startSchemeTopic = useCallback(async (schemeTopic: Topic, forceFresh = false) => {
+    setActiveTopic(schemeTopic);
+    setView("lesson");
+
+    const cacheMap = readCacheMap();
+    const cached = !forceFresh ? cacheMap[schemeTopic.id] : undefined;
+    let questionsCount: number;
+
+    if (cached) {
+      setError(null);
+      setLessonText(cached.lessonText);
+      setQuestions(cached.questions);
+      setCurrentIndex(0);
+      questionsCount = cached.questions.length;
+    } else {
+      const prompt = schemeTopicPrompt(schemeTopic);
+      const { lessonText, questions: generatedQuestions } = await runGeneration(prompt);
+      questionsCount = generatedQuestions.length;
+      if (lessonText && generatedQuestions.length > 0) {
+        writeCacheMap({
+          ...cacheMap,
+          [schemeTopic.id]: {
+            lessonText,
+            questions: generatedQuestions,
+            generatedAt: new Date().toISOString(),
+            sourceTopicPrompt: prompt,
+          },
+        });
+      }
+    }
+
+    setProgressMap((prev) => {
+      const next = recordVisit(prev, schemeTopic.id, questionsCount || undefined, forceFresh);
+      writeProgressMap(next);
+      return next;
+    });
+    writePosition(schemeTopic.id);
+    setCurrentPositionId(schemeTopic.id);
+  }, [runGeneration]);
 
   const nextQuestion = () => {
     setCurrentIndex((i) => Math.min(i + 1, questions.length - 1));
@@ -142,14 +232,14 @@ export default function Home() {
       <div className="mx-auto flex max-w-2xl gap-2 px-6 py-4">
         <input
           className="flex-1 rounded-md border border-slate-300 px-3 py-2"
-          placeholder="Teach me… e.g. adding fractions with different denominators"
+          placeholder="Or type your own topic… e.g. adding fractions with different denominators"
           value={topic}
           onChange={(e) => setTopic(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && startLesson()}
+          onKeyDown={(e) => e.key === "Enter" && startTypedTopic()}
         />
         <button
           className="rounded-md bg-slate-900 px-4 py-2 text-white disabled:opacity-40"
-          onClick={startLesson}
+          onClick={startTypedTopic}
           disabled={lessonLoading || questionsLoading || !topic.trim()}
         >
           {lessonLoading || questionsLoading ? "Working…" : "Teach me"}
@@ -162,53 +252,101 @@ export default function Home() {
         </div>
       )}
 
-      <main
-        ref={splitContainerRef}
-        className="mx-auto grid max-w-6xl gap-0 px-6 py-6"
-        style={{ gridTemplateColumns: `${splitPercent}% 8px 1fr` }}
-        suppressHydrationWarning
-      >
-        <section className="rounded-lg border border-slate-200 bg-white p-5">
-          <h2 className="mb-3 text-lg font-medium">Lesson</h2>
-          {lessonText ? (
-            <div className="prose prose-slate max-w-none text-[15px] leading-relaxed">
-              <KatexText text={lessonText} />
-            </div>
-          ) : (
-            <p className="text-sm text-slate-400">Type a topic above to get a lesson.</p>
-          )}
-        </section>
+      {view === "scheme" ? (
+        <div className="mx-auto max-w-3xl px-6 py-6">
+          <SchemePicker
+            progressMap={progressMap}
+            currentPositionId={currentPositionId}
+            onSelectTopic={(selected) => startSchemeTopic(selected)}
+          />
+        </div>
+      ) : (
+        <>
+          <div className="mx-auto flex max-w-6xl items-center gap-3 px-6">
+            <button
+              type="button"
+              className="text-sm text-slate-500 underline"
+              onClick={() => setView("scheme")}
+            >
+              ← Back to scheme
+            </button>
+            {activeTopic && (
+              <>
+                <span className="text-sm text-slate-400">
+                  Unit {activeTopic.unitNumber} · Lesson {activeTopic.lessonNumber} — {activeTopic.name}
+                </span>
+                <button
+                  type="button"
+                  className="ml-auto text-xs text-slate-500 underline disabled:opacity-40"
+                  onClick={() => startSchemeTopic(activeTopic, true)}
+                  disabled={lessonLoading || questionsLoading}
+                >
+                  ↻ Regenerate
+                </button>
+              </>
+            )}
+          </div>
 
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          onPointerDown={startDivider}
-          className="mx-1 cursor-col-resize rounded-full bg-slate-200 hover:bg-slate-300"
-          style={{ touchAction: "none" }}
-        />
+          <main
+            ref={splitContainerRef}
+            className="mx-auto grid max-w-6xl gap-0 px-6 py-6"
+            style={{ gridTemplateColumns: `${splitPercent}% 8px 1fr` }}
+            suppressHydrationWarning
+          >
+            <section className="rounded-lg border border-slate-200 bg-white p-5">
+              <h2 className="mb-3 text-lg font-medium">Lesson</h2>
+              {lessonText ? (
+                <div className="prose prose-slate max-w-none text-[15px] leading-relaxed">
+                  <KatexText text={lessonText} />
+                </div>
+              ) : (
+                <p className="text-sm text-slate-400">Generating…</p>
+              )}
+            </section>
 
-        <section className="min-w-0 rounded-lg border border-slate-200 bg-white p-5">
-          <h2 className="mb-3 text-lg font-medium">Practice</h2>
-
-          {questionsLoading && questions.length === 0 && (
-            <p className="text-sm text-slate-400">Generating questions…</p>
-          )}
-
-          {currentQuestion && (
-            <QuestionPanel
-              key={currentIndex}
-              question={currentQuestion}
-              questionNumber={currentIndex + 1}
-              total={questions.length}
-              responseMode={responseMode}
-              onResponseModeChange={setResponseMode}
-              onError={setError}
-              onNext={nextQuestion}
-              hasNext={currentIndex < questions.length - 1}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              onPointerDown={startDivider}
+              className="mx-1 cursor-col-resize rounded-full bg-slate-200 hover:bg-slate-300"
+              style={{ touchAction: "none" }}
             />
-          )}
-        </section>
-      </main>
+
+            <section className="min-w-0 rounded-lg border border-slate-200 bg-white p-5">
+              <h2 className="mb-3 text-lg font-medium">Practice</h2>
+
+              {questionsLoading && questions.length === 0 && (
+                <p className="text-sm text-slate-400">Generating questions…</p>
+              )}
+
+              {currentQuestion && (
+                <QuestionPanel
+                  key={currentIndex}
+                  question={currentQuestion}
+                  questionNumber={currentIndex + 1}
+                  total={questions.length}
+                  responseMode={responseMode}
+                  onResponseModeChange={setResponseMode}
+                  onError={setError}
+                  onNext={nextQuestion}
+                  hasNext={currentIndex < questions.length - 1}
+                  onAttempt={
+                    activeTopic
+                      ? (correct: boolean) => {
+                          setProgressMap((prev) => {
+                            const next = recordAttempt(prev, activeTopic.id, currentIndex, correct, questions.length);
+                            writeProgressMap(next);
+                            return next;
+                          });
+                        }
+                      : undefined
+                  }
+                />
+              )}
+            </section>
+          </main>
+        </>
+      )}
     </div>
   );
 }
@@ -224,6 +362,7 @@ function QuestionPanel({
   onError,
   onNext,
   hasNext,
+  onAttempt,
 }: {
   question: Question;
   questionNumber: number;
@@ -233,6 +372,10 @@ function QuestionPanel({
   onError: (message: string) => void;
   onNext: () => void;
   hasNext: boolean;
+  // Fired once per successfully-scored submission (typed check or handwritten mark) — omitted
+  // by the parent when the lesson didn't come from the scheme, so free-text lessons aren't
+  // progress-tracked (RFD §5.1).
+  onAttempt?: (correct: boolean) => void;
 }) {
   const [answer, setAnswer] = useState("");
   const [checking, setChecking] = useState(false);
@@ -263,13 +406,14 @@ function QuestionPanel({
         setHintRevealed(false);
         setSolutionRevealed(false);
         setRetyping(false);
+        onAttempt?.(parsed.verdict === "correct");
       } catch (err) {
         onError(err instanceof Error ? err.message : "Failed to mark drawing");
       } finally {
         setMarking(false);
       }
     },
-    [question, onError],
+    [question, onError, onAttempt],
   );
 
   const submitDrawing = useCallback(async () => {
@@ -297,12 +441,13 @@ function QuestionPanel({
       setCheckResult(data);
       setHintRevealed(false);
       setSolutionRevealed(false);
+      onAttempt?.(data.verdict === "correct" || data.verdict === "near_miss");
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to check answer");
     } finally {
       setChecking(false);
     }
-  }, [question, answer, onError]);
+  }, [question, answer, onError, onAttempt]);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">

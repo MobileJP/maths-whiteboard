@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkLocally } from "./answerCheck";
 import type { Question } from "./types";
 
@@ -129,9 +129,20 @@ describe("checkLocally — genuinely wrong answers are still rejected", () => {
 
 describe("checkLocally — escalates rather than guessing when it genuinely can't tell", () => {
   it("returns uncertain for an expression it can't safely evaluate across trial values", () => {
-    // sqrt(x) vs x^0.5: numeric-substitution trials include negative values, where sqrt
-    // domain-fails — RFD §9.2a says this should escalate to Haiku (§9.3), not guess either way.
-    const question = q({ answer_type: "expression", canonical_answer: "sqrt(x)" });
-    expect(checkLocally(question, "x^0.5").status).toBe("uncertain");
+    // sqrt(x) vs x^0.5 are only equal for x >= 0 — a domain failure requires a negative trial
+    // value, but expressionsEquivalent() in answerCheck.ts draws trial values from Math.random(),
+    // so left uncontrolled this test is flaky: whenever all 5 random trials happen to land on
+    // non-negative x, sqrt(x) never domain-fails and the two expressions coincidentally agree
+    // everywhere sampled, so checkLocally reports "correct" instead of "uncertain" (a real,
+    // harmless outcome for the local checker — not a bug — but it means this particular test
+    // proved nothing that run). Pin Math.random() so the trial value is always negative
+    // (0 -> -4 + 0.37 = -3.63), guaranteeing the domain-failure path is actually exercised.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const question = q({ answer_type: "expression", canonical_answer: "sqrt(x)" });
+      expect(checkLocally(question, "x^0.5").status).toBe("uncertain");
+    } finally {
+      randomSpy.mockRestore();
+    }
   });
 });
