@@ -187,7 +187,7 @@ export default function Home() {
           style={{ touchAction: "none" }}
         />
 
-        <section className="rounded-lg border border-slate-200 bg-white p-5">
+        <section className="min-w-0 rounded-lg border border-slate-200 bg-white p-5">
           <h2 className="mb-3 text-lg font-medium">Practice</h2>
 
           {questionsLoading && questions.length === 0 && (
@@ -305,7 +305,7 @@ function QuestionPanel({
   }, [question, answer, onError]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       <p className="text-sm text-slate-500">
         Q{questionNumber} of {total} · {question.difficulty}
       </p>
@@ -328,7 +328,7 @@ function QuestionPanel({
           </button>
         </div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="flex min-w-0 flex-col gap-2">
           <Whiteboard ref={whiteboardRef} />
           <button
             type="button"

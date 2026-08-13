@@ -75,6 +75,7 @@ export const Whiteboard = forwardRef<WhiteboardHandle, { className?: string }>(f
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [redoStack, setRedoStack] = useState<Stroke[]>([]);
   const [tool, setTool] = useState<"pen" | "eraser">("pen");
+  const [expanded, setExpanded] = useState(false);
 
   const activeStrokeRef = useRef<Stroke | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
@@ -228,61 +229,84 @@ export const Whiteboard = forwardRef<WhiteboardHandle, { className?: string }>(f
   );
 
   return (
-    <div className={className}>
-      <div className="mb-2 flex items-center gap-2">
-        <button
-          type="button"
-          className={`rounded-md border px-3 py-1 text-sm ${tool === "pen" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`}
-          onClick={() => setTool("pen")}
-        >
-          ✏️ Pen
-        </button>
-        <button
-          type="button"
-          className={`rounded-md border px-3 py-1 text-sm ${tool === "eraser" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`}
-          onClick={() => setTool("eraser")}
-        >
-          ⌫ Eraser
-        </button>
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
-          onClick={undo}
-          disabled={strokes.length === 0}
-        >
-          ↶ Undo
-        </button>
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
-          onClick={redo}
-          disabled={redoStack.length === 0}
-        >
-          ↷ Redo
-        </button>
-        <button
-          type="button"
-          className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
-          onClick={clear}
-          disabled={strokes.length === 0}
-        >
-          🗑 Clear
-        </button>
-      </div>
+    <>
+      {/* Backdrop only exists in expanded mode; tapping it collapses back, same as Done. */}
+      {expanded && (
+        <div className="fixed inset-0 z-40 bg-slate-900/40" onClick={() => setExpanded(false)} />
+      )}
       <div
-        ref={containerRef}
-        className="h-64 w-full overflow-hidden rounded-md border border-slate-300 bg-white sm:h-80"
-        style={{ touchAction: "none" }}
+        className={
+          expanded
+            ? "fixed inset-3 z-50 flex flex-col rounded-lg border border-slate-300 bg-white p-3 shadow-2xl sm:inset-10"
+            : `min-w-0 ${className ?? ""}`
+        }
       >
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={endStroke}
-          onPointerCancel={endStroke}
-          style={{ touchAction: "none", display: "block", width: "100%", height: "100%" }}
-        />
+        <div className="mb-2 flex items-center gap-2">
+          <button
+            type="button"
+            className={`rounded-md border px-3 py-1 text-sm ${tool === "pen" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`}
+            onClick={() => setTool("pen")}
+          >
+            ✏️ Pen
+          </button>
+          <button
+            type="button"
+            className={`rounded-md border px-3 py-1 text-sm ${tool === "eraser" ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300"}`}
+            onClick={() => setTool("eraser")}
+          >
+            ⌫ Eraser
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
+            onClick={undo}
+            disabled={strokes.length === 0}
+          >
+            ↶ Undo
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
+            onClick={redo}
+            disabled={redoStack.length === 0}
+          >
+            ↷ Redo
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40"
+            onClick={clear}
+            disabled={strokes.length === 0}
+          >
+            🗑 Clear
+          </button>
+          <button
+            type="button"
+            className="ml-auto rounded-md border border-slate-300 px-3 py-1 text-sm"
+            onClick={() => setExpanded((e) => !e)}
+          >
+            {expanded ? "✕ Done" : "⤢ More space"}
+          </button>
+        </div>
+        {/* Strokes are stored as vectors in container-relative pixels (RFD §10.3), so toggling
+            between the inline and expanded sizes never distorts existing work — it just changes
+            how much of the canvas is visible/available, the ResizeObserver in the effect above
+            picks up the container size change and re-renders at it. */}
+        <div
+          ref={containerRef}
+          className={`w-full min-w-0 overflow-hidden rounded-md border border-slate-300 bg-white ${expanded ? "flex-1" : "h-72 sm:h-[28rem]"}`}
+          style={{ touchAction: "none" }}
+        >
+          <canvas
+            ref={canvasRef}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={endStroke}
+            onPointerCancel={endStroke}
+            style={{ touchAction: "none", display: "block", width: "100%", height: "100%" }}
+          />
+        </div>
       </div>
-    </div>
+    </>
   );
 });
